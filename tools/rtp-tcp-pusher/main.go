@@ -1,0 +1,207 @@
+package main
+
+import (
+	"bufio"
+	"gitee.com/sy_183/common/assert"
+	"gitee.com/sy_183/common/component"
+	"gitee.com/sy_183/common/config"
+	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/pool"
+	"gitee.com/sy_183/common/unit"
+	"gitee.com/sy_183/rtp/frame"
+	"gitee.com/sy_183/rtp/rtp"
+	"gitee.com/sy_183/rtp/server"
+	"gitee.com/sy_183/rtp/utils"
+	"github.com/spf13/cobra"
+	"net"
+	"os"
+	"time"
+)
+
+func init() {
+	cobra.MousetrapHelpText = ""
+}
+
+type Config struct {
+	Help      bool
+	Addr      *net.TCPAddr
+	StartSeq  int
+	Sampling  uint
+	SSRC      int
+	File      string
+	LogOutput string
+}
+
+var args = component.Pointer[Config]{Init: func() *Config {
+	c := new(Config)
+	config.Handle(c)
+	command := cobra.Command{
+		Use:   "rtp-tcp-pusher",
+		Short: "rtp tcp push stream application",
+		Long:  "rtp tcp push stream application",
+		Run: func(cmd *cobra.Command, args []string) {
+			c.Help = false
+		},
+	}
+	var addr string
+	command.Flags().StringVarP(&addr, "server-addr", "s", "127.0.0.1:5004", "specify server address")
+	command.Flags().IntVar(&c.StartSeq, "start-seq", -1, "specify rtp start sequence number")
+	command.Flags().UintVar(&c.Sampling, "sampling", 90000, "specify rtp sampling rate")
+	command.Flags().IntVar(&c.SSRC, "ssrc", -1, "specify rtp SSRC")
+	command.Flags().StringVarP(&c.File, "file", "f", "", "specify dump file path")
+	command.Flags().StringVarP(&c.LogOutput, "log-output", "o", "stdout", "log output path")
+	err := command.Execute()
+	logger = assert.Must(log.Config{
+		Level: log.NewAtomicLevelAt(log.DebugLevel),
+		Encoder: log.NewConsoleEncoder(log.ConsoleEncoderConfig{
+			DisableCaller:     true,
+			DisableFunction:   true,
+			DisableStacktrace: true,
+			EncodeLevel:       log.CapitalColorLevelEncoder,
+			EncodeTime:        log.TimeEncoderOfLayout(DefaultTimeLayout),
+			EncodeDuration:    log.SecondsDurationEncoder,
+		}),
+		OutputPaths: []string{c.LogOutput},
+	}.Build())
+	if err != nil {
+		Logger().Fatal("parse command error", log.Error(err))
+	}
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		Logger().Fatal("parse tcp address error", log.Error(err))
+	}
+	c.Addr = tcpAddr
+	if c.File == "" {
+		Logger().Fatal("rtp file must be specified")
+	}
+	if c.Help {
+		os.Exit(0)
+	}
+	return c
+}}
+
+func GetConfig() *Config {
+	return args.Get()
+}
+
+func main() {
+	cfg := GetConfig()
+	fp, err := os.Open(cfg.File)
+	if err != nil {
+		Logger().Fatal("open rtp file error", log.Error(err), log.String("file", cfg.File))
+	}
+	defer func() {
+		if err := fp.Close(); err != nil {
+			Logger().ErrorWith("close file error", err)
+		}
+	}()
+	conn, err := net.DialTCP("tcp", nil, cfg.Addr)
+	if err != nil {
+		Logger().Fatal("connect to server error", log.Error(err), log.String("addr", cfg.Addr.String()))
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			Logger().ErrorWith("close tcp connection error", err)
+		}
+	}()
+
+	writePool64K := pool.NewDataPool(64 * unit.KiBiByte)
+	writePool128K := pool.NewDataPool(128 * unit.KiBiByte)
+	writePool256K := pool.NewDataPool(256 * unit.KiBiByte)
+	writePool512K := pool.NewDataPool(512 * unit.KiBiByte)
+	writePool1M := pool.NewDataPool(unit.MeBiByte)
+
+	var seq uint16
+	var initSeq bool
+
+	var initTime bool
+	var timeDiff = uint32(0)
+	var timeDiffAvg = uint32(0)
+	var timeDiffCount = uint32(0)
+	var lastTime = uint32(0)
+	var timestamp = uint32(0)
+
+	var lastWrite time.Time
+
+	frameHandler := frame.NewFrameRTPHandler(frame.FrameHandlerFunc{
+		HandleFrameFn: func(_ server.Stream, frame *frame.Frame) {
+			if !initTime {
+				initTime = true
+			} else {
+				if frame.Timestamp < lastTime {
+					timeDiff = timeDiffAvg
+				} else {
+					timeDiff = frame.Timestamp - lastTime
+				}
+				timeDiffAvg = (timeDiffAvg*timeDiffCount + timeDiff) / (timeDiffCount + 1)
+				timeDiffCount++
+				timestamp += timeDiff
+			}
+			lastTime = frame.Timestamp
+
+			size := uint(len(frame.Layers) * 4)
+			for _, layer := range frame.Layers {
+				size += layer.Size()
+			}
+			var data *pool.Data
+			switch {
+			case size <= 64*unit.KiBiByte:
+				data = writePool64K.Alloc(size)
+			case size > 64 && size <= 128*unit.KiBiByte:
+				data = writePool128K.Alloc(size)
+			case size > 128 && size <= 256*unit.KiBiByte:
+				data = writePool256K.Alloc(size)
+			case size > 256 && size <= 512*unit.KiBiByte:
+				data = writePool512K.Alloc(size)
+			case size > 512 && size <= unit.MeBiByte:
+				data = writePool1M.Alloc(size)
+			default:
+				data = pool.NewData(make([]byte, size))
+			}
+			w := utils.Writer{Buf: data.Data}
+			rw := rtp.Writer{Writer: &w}
+			for _, layer := range frame.Layers {
+				if cfg.SSRC >= 0 {
+					layer.SetSSRC(uint32(cfg.SSRC))
+				}
+				layer.SetSequenceNumber(seq)
+				layer.SetTimestamp(timestamp)
+				seq++
+				rw.Write(layer)
+			}
+
+			if lastWrite != (time.Time{}) {
+				now := time.Now()
+				expect := lastWrite.Add(time.Second * time.Duration(timeDiff) / time.Duration(cfg.Sampling))
+				if now.After(expect) {
+					Logger().Warn("delay write frame", log.Duration("delay", now.Sub(expect)))
+				} else {
+					time.Sleep(expect.Sub(now))
+				}
+			}
+			lastWrite = time.Now()
+			_, err := conn.Write(data.Data)
+			if err != nil {
+				Logger().Fatal("tcp connection write error", log.Error(err))
+			}
+		},
+	})
+
+	fr := bufio.NewReaderSize(fp, unit.MeBiByte)
+	rr := rtp.Reader{Reader: fr}
+	for {
+		layer, err := rr.Read()
+		if !initSeq {
+			if cfg.StartSeq < 0 {
+				seq = layer.SequenceNumber()
+			} else {
+				seq = uint16(cfg.StartSeq)
+			}
+			initSeq = true
+		}
+		if err != nil {
+			Logger().Fatal("parse rtp file error", log.Error(err))
+		}
+		frameHandler.HandlePacket(nil, rtp.NewPacket(layer))
+	}
+}
