@@ -1,8 +1,15 @@
 package server
 
 import (
+	"errors"
 	"net"
 	"time"
+)
+
+var (
+	TooManyParseError  = errors.New("RTP连续解析错误太多")
+	FrequentParseError = errors.New("RTP解析错误太频繁")
+	BufferAllocError   = errors.New("RTP缓冲区申请失败")
 )
 
 type Err struct {
@@ -60,10 +67,18 @@ type SetNoDelayError struct {
 	NoDelay bool
 }
 
+type TCPChannelCloseError struct {
+	Err
+}
+
 type UDPReadError struct {
 	Err
 }
 
 type TCPReadError struct {
+	Err
+}
+
+type TCPReadTimeout struct {
 	Err
 }

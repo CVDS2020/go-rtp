@@ -16,13 +16,6 @@ func (f managerOptionFunc) apply(m *Manager) any {
 	return f(m)
 }
 
-func WithManagerName(name string) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
-		m.name = name
-		return nil
-	})
-}
-
 func WithServerOptions(options ...Option) ManagerOption {
 	return managerOptionFunc(func(m *Manager) any {
 		m.serverOptions = append(m.serverOptions, options...)
@@ -86,30 +79,9 @@ func WithAllocMaxRetry(maxRetry int) ManagerOption {
 	})
 }
 
-func WithRetryInterval(interval time.Duration) ManagerOption {
+func WithServerRestartInterval(interval time.Duration) ManagerOption {
 	return managerOptionFunc(func(m *Manager) any {
 		m.serverRestartInterval = interval
-		return nil
-	})
-}
-
-func WithServerStarted(onStarted func(s Server, err error)) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
-		m.retryableSetters = append(m.retryableSetters, RetryableSetOnStarted(onStarted))
-		return nil
-	})
-}
-
-func WithServerClosed(onClosed func(s Server, err error)) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
-		m.retryableSetters = append(m.retryableSetters, RetryableSetOnClosed(onClosed))
-		return nil
-	})
-}
-
-func WithServerClose(onClose func(s Server, err error)) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
-		m.retryableSetters = append(m.retryableSetters, RetryableSetOnClose(onClose))
 		return nil
 	})
 }

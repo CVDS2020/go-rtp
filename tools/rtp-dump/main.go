@@ -98,11 +98,11 @@ func main() {
 	rw := rtp.Writer{Writer: fw}
 	options := []server.Option{
 		server.WithSocketBuffer(cfg.ReadBuffer, cfg.WriteBuffer),
-		server.WithBufferPoolSize(cfg.BufferSize),
+		server.WithBufferPoolConfig(cfg.BufferSize, "sync"),
 		server.WithBufferReverse(cfg.BufferReverse),
 	}
 	s := server.NewUDPServer(cfg.Addr, options...)
-	s.SetLogger(Logger().WithOptions(log.WithName(s.Name())))
+	s.SetLogger(Logger().WithOptions(log.WithName(s.Addr().String())))
 	s.Stream(nil, -1, server.HandlerFunc{HandlePacketFn: func(stream server.Stream, packet *rtp.Packet) {
 		defer packet.Release()
 		if err := rw.Write(packet.Layer); err != nil {

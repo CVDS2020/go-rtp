@@ -12,9 +12,9 @@ type Packet struct {
 	*Layer
 	Addr   net.Addr
 	Time   time.Time
-	Chunks []*Data
+	Chunks []*pool.Data
 	ref    atomic.Int64
-	pool   *pool.Pool[*Packet]
+	pool   pool.Pool[*Packet]
 }
 
 type PacketSetter func(packet *Packet)
@@ -31,19 +31,19 @@ func PacketTime(time time.Time) PacketSetter {
 	}
 }
 
-func PacketData(data *Data) PacketSetter {
+func PacketData(data *pool.Data) PacketSetter {
 	return func(packet *Packet) {
 		packet.Chunks = append(packet.Chunks[:0], data)
 	}
 }
 
-func PacketChunks(chunks []*Data) PacketSetter {
+func PacketChunks(chunks []*pool.Data) PacketSetter {
 	return func(packet *Packet) {
 		packet.Chunks = append(packet.Chunks[:0], chunks...)
 	}
 }
 
-func PacketPool(pool *pool.Pool[*Packet]) PacketSetter {
+func PacketPool(pool pool.Pool[*Packet]) PacketSetter {
 	return func(packet *Packet) {
 		packet.pool = pool
 	}

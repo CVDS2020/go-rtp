@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"gitee.com/sy_183/common/assert"
 	"gitee.com/sy_183/common/component"
 	"gitee.com/sy_183/common/config"
@@ -11,6 +12,7 @@ import (
 	"gitee.com/sy_183/common/unit"
 	"gitee.com/sy_183/rtp/frame"
 	"gitee.com/sy_183/rtp/server"
+	"gitee.com/sy_183/rtp/tools/common"
 	"github.com/spf13/cobra"
 	"net"
 	"os"
@@ -38,22 +40,22 @@ var args = component.Pointer[Config]{Init: func() *Config {
 	config.Handle(c)
 	command := cobra.Command{
 		Use:   "rtp-udp-receiver",
-		Short: "rtp udp receive application",
-		Long:  "rtp udp receive application",
+		Short: "基于UDP的RTP接收器",
+		Long:  "基于UDP的RTP接收器",
 		Run: func(cmd *cobra.Command, args []string) {
-			c.Help = false
 		},
 	}
 	var addr string
-	command.Flags().StringVarP(&addr, "listen-addr", "l", "0.0.0.0", "specify listen ip address")
-	command.Flags().Uint16VarP(&c.PortStart, "port-start", "s", 5004, "specify listen port start")
-	command.Flags().Uint16VarP(&c.PortEnd, "port-end", "e", 5024, "specify listen port end")
-	command.Flags().IntVar(&c.ReadBuffer, "read-buffer", unit.MeBiByte, "specify system socket read buffer")
-	command.Flags().IntVar(&c.WriteBuffer, "write-buffer", unit.MeBiByte, "specify system socket write buffer")
-	command.Flags().UintVar(&c.BufferSize, "buffer", unit.KiBiByte*256, "specify udp read buffer")
-	command.Flags().UintVar(&c.BufferReverse, "buffer-reverse", 2048, "specify udp read buffer reverse")
-	command.Flags().BoolVar(&c.DebugFrame, "debug-frame", false, "debug rtp parsed frame count")
-	command.Flags().StringVarP(&c.LogOutput, "log-output", "o", "stdout", "log output path")
+	command.Flags().StringVarP(&addr, "listen-addr", "l", "0.0.0.0", "指定UDP监听IP地址")
+	command.Flags().Uint16VarP(&c.PortStart, "port-start", "s", 5004, "指定UDP监听起始端口")
+	command.Flags().Uint16VarP(&c.PortEnd, "port-end", "e", 5024, "指定UDP监听结束端口")
+	command.Flags().IntVar(&c.ReadBuffer, "read-buffer", unit.MeBiByte, "指定UDP SOCKET读缓冲区大小，单位为字节")
+	command.Flags().IntVar(&c.WriteBuffer, "write-buffer", unit.MeBiByte, "指定UDP SOCKET写缓冲区大小，单位为字节")
+	command.Flags().UintVar(&c.BufferSize, "buffer", unit.KiBiByte*256, "指定UDP缓冲区大小，单位为字节")
+	command.Flags().UintVar(&c.BufferReverse, "buffer-reverse", 2048, "指定UDP缓冲区保留大小，如果此大小小于接收到的UDP包大小，则可能出现接收到的UDP包数据不完整")
+	command.Flags().BoolVar(&c.DebugFrame, "debug-frame", false, "是否打印接收到的帧数据")
+	command.Flags().StringVarP(&c.LogOutput, "log-output", "o", "stdout", "日志输出位置")
+	command.Flags().BoolVarP(&c.Help, "help", "h", false, "显示帮助信息")
 	err := command.Execute()
 	logger = assert.Must(log.Config{
 		Level: log.NewAtomicLevelAt(log.DebugLevel),
@@ -68,11 +70,11 @@ var args = component.Pointer[Config]{Init: func() *Config {
 		OutputPaths: []string{c.LogOutput},
 	}.Build())
 	if err != nil {
-		Logger().Fatal("parse command error", log.Error(err))
+		Logger().Fatal("解析命令行参数失败", log.Error(err))
 	}
 	ipAddr, err := net.ResolveIPAddr("ip", addr)
 	if err != nil {
-		Logger().Fatal("parse ip address error", log.Error(err))
+		Logger().Fatal("解析UDP监听IP地址失败", log.Error(err))
 	}
 	c.Addr = ipAddr
 	c.PortStart = def.SetDefault(c.PortStart, 5004)
@@ -93,38 +95,42 @@ func main() {
 	cfg := GetConfig()
 	options := []server.Option{
 		server.WithSocketBuffer(cfg.ReadBuffer, cfg.WriteBuffer),
-		server.WithBufferPoolSize(cfg.BufferSize),
+		server.WithBufferPoolConfig(cfg.BufferSize, "slice"),
 		server.WithBufferReverse(cfg.BufferReverse),
 	}
-	var servers []lifecycle.ChildLifecycle
+	servers := lifecycle.NewGroup()
 	for port := cfg.PortStart; port < cfg.PortEnd; port++ {
 		s := server.NewUDPServer(&net.UDPAddr{
 			IP:   cfg.Addr.IP,
 			Port: int(port),
 			Zone: cfg.Addr.Zone,
 		}, options...)
-		s.SetLogger(Logger().WithOptions(log.WithName(s.Name())))
-		s.Stream(nil, -1, frame.NewFrameRTPHandler(frame.FrameHandlerFunc{
+		name := fmt.Sprintf("基于UDP的RTP服务(%s)", s.Addr().String())
+		s.SetLogger(Logger().Named(name))
+		s.OnStarting(common.OnStarting("UDP服务", s.Logger())).
+			OnStarted(common.OnStarted("UDP服务", s.Logger())).
+			OnClose(common.OnClose("UDP服务", s.Logger())).
+			OnClosed(common.OnClosed("UDP服务", s.Logger()))
+		s.Stream(nil, -1, server.DefaultKeepChooserHandler(frame.NewFrameRTPHandler(frame.FrameHandlerFunc{
 			HandleFrameFn: func(stream server.Stream, frame *frame.Frame) {
-				//stream.Logger().Info("receiver frame", log.Uint32("timestamp", frame.Timestamp))
+				if cfg.DebugFrame {
+					stream.Logger().Debug("接收到数据帧", log.Uint32("时间戳", frame.Timestamp))
+				}
 				frame.Release()
 			},
-		})).SetOnLossPacket(func(stream server.Stream, loss int) {
-			s.Logger().Warn("rtp loss packet", log.Int("loss packet", loss))
-		})
-		servers = append(servers, lifecycle.ChildLifecycle{
-			Lifecycle: s,
-			OnStarted: func(l lifecycle.Lifecycle) {
-				s := l.(server.Server)
-				s.Logger().Info("rtp server start success", log.String("addr", s.Addr().String()))
+			OnParseRTPErrorFn: func(stream server.Stream, err error) (keep bool) {
+				stream.Logger().ErrorWith("解析RTP包错误", err)
+				return true
 			},
-			OnClosed: func(l lifecycle.Lifecycle) {
-				s := l.(server.Server)
-				s.Logger().Info("rtp server closed", log.String("addr", s.Addr().String()))
+			OnStreamClosedFn: func(stream server.Stream) {
+				stream.Logger().Info("RTP流已关闭")
 			},
+		}), 5, 5)).SetOnLossPacket(func(stream server.Stream, loss int) {
+			stream.Logger().Warn("检测到RTP丢包", log.Int("丢弃数量", loss))
 		})
+		servers.Add(name, s)
 	}
-	exit := svc.New("rtp udp receiver", lifecycle.NewGroup("rtp udp receiver", servers)).Run()
+	exit := svc.New("基于UDP的RTP接收器", servers).Run()
 	Logger().Sync()
 	os.Exit(exit)
 }

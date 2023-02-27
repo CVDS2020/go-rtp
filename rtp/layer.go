@@ -380,7 +380,7 @@ func (l *Layer) Unmarshal(data []byte) error {
 	return nil
 }
 
-func (l *Layer) UnmarshalChunks(chunks [][]byte) error {
+func (l *Layer) UnmarshalChunks(chunks slice.Chunks[byte]) error {
 	if len(chunks) == 1 {
 		return l.Unmarshal(chunks[0])
 	}
@@ -393,33 +393,35 @@ func (l *Layer) UnmarshalChunks(chunks [][]byte) error {
 		return PacketSizeNotEnoughError
 	}
 
-	baseHeader, cur := SplitIntoBytesLinear(chunks, 12)
+	baseHeader, cur := chunks.Slice(-1, 12), chunks.Cut(12, -1)
 	csrcCount, err := l.parseBaseHeader(baseHeader, length, &minSize)
 	if err != nil {
 		return err
 	}
 
 	// parse csrc list
-	csrcData, cur := SplitIntoBytesLinear(cur, uint(csrcCount*4))
+	csrcDataSize := int(csrcCount * 4)
+	csrcData, cur := cur.Slice(-1, csrcDataSize), cur.Cut(csrcDataSize, -1)
 	l.parseCSRC(csrcData, csrcCount)
 
 	if l.HasExtension() {
 		// parse extension header
 		var extensionHeader, extensionData []byte
-		extensionHeader, cur = SplitIntoBytesLinear(cur, 4)
+		extensionHeader, cur = cur.Slice(-1, 4), cur.Cut(4, -1)
 		extensionLength, err := l.parseExtensionHeader(extensionHeader, length, &minSize)
 		if err != nil {
 			return err
 		}
 
 		// parse extension content
-		extensionData, cur = SplitIntoBytesLinear(cur, uint(extensionLength*4))
+		extensionDataSize := int(extensionLength * 4)
+		extensionData, cur = cur.Slice(-1, extensionDataSize), cur.Cut(extensionDataSize, -1)
 		l.parseExtensionData(extensionData, extensionLength)
 	}
 
 	// parse padding
 	if l.HasPadding() {
-		l.paddingLength = ChunksLastByte(chunks)
+		l.paddingLength, _ = chunks.Last()
 		if err := l.parsePadding(length, &minSize); err != nil {
 			return err
 		}
@@ -429,7 +431,7 @@ func (l *Layer) UnmarshalChunks(chunks [][]byte) error {
 	payloadLength := length - minSize
 
 	if payloadLength > 0 {
-		contents := ChunksCutChunksTo(cur, uint(payloadLength))
+		contents := cur.Cut(-1, payloadLength)
 		l.content = contents[0]
 		l.extends = append(l.extends[:0], contents[1:]...)
 	} else {

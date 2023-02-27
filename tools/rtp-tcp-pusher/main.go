@@ -6,7 +6,7 @@ import (
 	"gitee.com/sy_183/common/component"
 	"gitee.com/sy_183/common/config"
 	"gitee.com/sy_183/common/log"
-	"gitee.com/sy_183/common/pool"
+	poolPkg "gitee.com/sy_183/common/pool"
 	"gitee.com/sy_183/common/unit"
 	"gitee.com/sy_183/rtp/frame"
 	"gitee.com/sy_183/rtp/rtp"
@@ -105,11 +105,7 @@ func main() {
 		}
 	}()
 
-	writePool64K := pool.NewDataPool(64 * unit.KiBiByte)
-	writePool128K := pool.NewDataPool(128 * unit.KiBiByte)
-	writePool256K := pool.NewDataPool(256 * unit.KiBiByte)
-	writePool512K := pool.NewDataPool(512 * unit.KiBiByte)
-	writePool1M := pool.NewDataPool(unit.MeBiByte)
+	pool := poolPkg.NewDynamicDataPoolExp(64*unit.KiBiByte, unit.MeBiByte, "sync")
 
 	var seq uint16
 	var initSeq bool
@@ -139,28 +135,14 @@ func main() {
 			}
 			lastTime = frame.Timestamp
 
-			size := uint(len(frame.Layers) * 4)
-			for _, layer := range frame.Layers {
+			size := uint(len(frame.RTPLayers) * 4)
+			for _, layer := range frame.RTPLayers {
 				size += layer.Size()
 			}
-			var data *pool.Data
-			switch {
-			case size <= 64*unit.KiBiByte:
-				data = writePool64K.Alloc(size)
-			case size > 64 && size <= 128*unit.KiBiByte:
-				data = writePool128K.Alloc(size)
-			case size > 128 && size <= 256*unit.KiBiByte:
-				data = writePool256K.Alloc(size)
-			case size > 256 && size <= 512*unit.KiBiByte:
-				data = writePool512K.Alloc(size)
-			case size > 512 && size <= unit.MeBiByte:
-				data = writePool1M.Alloc(size)
-			default:
-				data = pool.NewData(make([]byte, size))
-			}
+			var data = pool.Alloc(size)
 			w := utils.Writer{Buf: data.Data}
 			rw := rtp.Writer{Writer: &w}
-			for _, layer := range frame.Layers {
+			for _, layer := range frame.RTPLayers {
 				if cfg.SSRC >= 0 {
 					layer.SetSSRC(uint32(cfg.SSRC))
 				}

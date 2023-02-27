@@ -11,11 +11,9 @@ type Server interface {
 
 	log.LoggerProvider
 
-	Name() string
-
 	Addr() net.Addr
 
-	Stream(remoteAddr net.Addr, ssrc int64, handler Handler) Stream
+	Stream(remoteAddr net.Addr, ssrc int64, handler Handler, options ...Option) (Stream, error)
 
 	RemoveStream(stream Stream)
 }

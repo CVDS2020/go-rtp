@@ -9,7 +9,13 @@ import (
 type TCPStream struct {
 	abstractStream[TCPServer, net.TCPAddr]
 	channel atomic.Pointer[TCPChannel]
-	addrID  string
+	addrId  string
+}
+
+func newTCPStream(addrId string, server *TCPServer, localAddr *net.TCPAddr, remoteAddr net.Addr, ssrc int64, handler Handler, options ...Option) *TCPStream {
+	stream := &TCPStream{addrId: addrId}
+	stream.init(stream, server, localAddr, remoteAddr, ssrc, handler, options...)
+	return stream
 }
 
 func (s *TCPStream) Send(layer *rtp.Layer) error {
