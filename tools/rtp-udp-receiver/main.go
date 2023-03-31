@@ -8,6 +8,7 @@ import (
 	"gitee.com/sy_183/common/def"
 	"gitee.com/sy_183/common/lifecycle"
 	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/option"
 	svc "gitee.com/sy_183/common/system/service"
 	"gitee.com/sy_183/common/unit"
 	"gitee.com/sy_183/rtp/frame"
@@ -93,7 +94,7 @@ func GetConfig() *Config {
 
 func main() {
 	cfg := GetConfig()
-	options := []server.Option{
+	options := []option.AnyOption{
 		server.WithSocketBuffer(cfg.ReadBuffer, cfg.WriteBuffer),
 		server.WithBufferPoolConfig(cfg.BufferSize, "slice"),
 		server.WithBufferReverse(cfg.BufferReverse),
@@ -112,7 +113,7 @@ func main() {
 			OnClose(common.OnClose("UDP服务", s.Logger())).
 			OnClosed(common.OnClosed("UDP服务", s.Logger()))
 		s.Stream(nil, -1, server.DefaultKeepChooserHandler(frame.NewFrameRTPHandler(frame.FrameHandlerFunc{
-			HandleFrameFn: func(stream server.Stream, frame *frame.Frame) {
+			HandleFrameFn: func(stream server.Stream, frame *frame.frame) {
 				if cfg.DebugFrame {
 					stream.Logger().Debug("接收到数据帧", log.Uint32("时间戳", frame.Timestamp))
 				}

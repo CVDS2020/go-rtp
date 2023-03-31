@@ -120,7 +120,7 @@ func main() {
 	var lastWrite time.Time
 
 	frameHandler := frame.NewFrameRTPHandler(frame.FrameHandlerFunc{
-		HandleFrameFn: func(_ server.Stream, frame *frame.Frame) {
+		HandleFrameFn: func(_ server.Stream, frame *frame.frame) {
 			if !initTime {
 				initTime = true
 			} else {
@@ -184,6 +184,6 @@ func main() {
 		if err != nil {
 			Logger().Fatal("parse rtp file error", log.Error(err))
 		}
-		frameHandler.HandlePacket(nil, rtp.NewPacket(layer))
+		frameHandler.HandlePacket(nil, rtp.NewIncomingPacket(layer))
 	}
 }

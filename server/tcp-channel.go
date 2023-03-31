@@ -25,14 +25,13 @@ type TCPChannel struct {
 
 	stream atomic.Pointer[TCPStream]
 	parser rtp.Parser
-	packet *rtp.Packet
+	packet *rtp.IncomingPacket
 
 	timer timeoutTimer
 
 	readBufferPool  pool.BufferPool
 	writeBufferPool pool.DataPool
-	dropBuffer      []byte
-	packetPool      pool.Pool[*rtp.Packet]
+	packetPool      pool.Pool[*rtp.IncomingPacket]
 
 	onError             atomic.Pointer[func(c *TCPChannel, err error)]
 	onTimeout           atomic.Pointer[func(*TCPChannel)]
@@ -45,10 +44,8 @@ func (c *TCPChannel) setTimeout(timeout time.Duration) {
 	c.timer.setTimeout(timeout)
 }
 
-func (c *TCPChannel) setPacketPoolProvider(provider pool.PoolProvider[*rtp.Packet]) {
-	c.packetPool = provider(func(p pool.Pool[*rtp.Packet]) *rtp.Packet {
-		return rtp.NewPacket(rtp.NewLayer(), rtp.PacketPool(p))
-	})
+func (c *TCPChannel) setPacketPoolProvider(provider pool.PoolProvider[*rtp.IncomingPacket]) {
+	c.packetPool = provider(rtp.ProvideIncomingPacket)
 }
 
 func (c *TCPChannel) setReadBufferPool(bufferPool pool.BufferPool) {
@@ -228,7 +225,7 @@ func (c *TCPChannel) run(lifecycle.Lifecycle) error {
 		}
 	}()
 
-	keepChooser := NewDefaultKeepChooser(5, 5)
+	keepChooser := NewDefaultKeepChooser(5, 5, nil)
 
 	// read and parse
 	// c.parser.ID = '*' // GB28181 RTP over TCP
@@ -246,13 +243,13 @@ func (c *TCPChannel) run(lifecycle.Lifecycle) error {
 			if c.packet == nil {
 				// 从RTP包的池中获取，并且添加至解析器
 				c.packet = c.packetPool.Get().Use()
-				c.parser.Layer = c.packet.Layer
+				c.parser.Layer = c.packet.IncomingLayer
 			}
 			if ok, p, err = c.parser.Parse(p); ok {
 				// 解析RTP包成功
-				c.packet.Chunks = append(c.packet.Chunks, data.Use())
-				c.packet.Addr = c.remoteAddr
-				c.packet.Time = time.Now()
+				c.packet.AddRelation(data.Use())
+				c.packet.SetAddr(c.remoteAddr)
+				c.packet.SetTime(time.Now())
 				if stream := c.stream.Load(); stream != nil {
 					// 将RTP包交给流处理，流处理器必须在使用完RTP包后将其释放
 					dropped, keep := stream.HandlePacket(stream, c.packet)
@@ -290,7 +287,7 @@ func (c *TCPChannel) run(lifecycle.Lifecycle) error {
 				}
 			} else {
 				// 解析RTP包未完成，需要将此块数据的引用添加到此RTP包中
-				c.packet.Chunks = append(c.packet.Chunks, data.Use())
+				c.packet.AddRelation(data.Use())
 			}
 		}
 
@@ -305,11 +302,11 @@ func (c *TCPChannel) close(lifecycle.Lifecycle) error {
 	return nil
 }
 
-func (c *TCPChannel) Send(layer *rtp.Layer) error {
+func (c *TCPChannel) Send(layer rtp.Layer) error {
 	conn := c.conn.Get()
 	if conn != nil {
 		size := layer.Size()
-		data := c.writeBufferPool.Alloc(size)
+		data := c.writeBufferPool.Alloc(uint(size))
 		layer.Read(data.Data)
 		_, err := conn.Write(data.Data)
 		data.Release()

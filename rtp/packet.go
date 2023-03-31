@@ -1,89 +1,134 @@
 package rtp
 
 import (
-	"fmt"
 	"gitee.com/sy_183/common/pool"
 	"net"
-	"sync/atomic"
 	"time"
 )
 
-type Packet struct {
-	*Layer
-	Addr   net.Addr
-	Time   time.Time
-	Chunks []*pool.Data
-	ref    atomic.Int64
-	pool   pool.Pool[*Packet]
+type Packet interface {
+	Layer
+
+	AddRelation(relation pool.Reference)
+
+	Clear()
+
+	pool.Reference
 }
 
-type PacketSetter func(packet *Packet)
-
-func PacketAddr(addr net.Addr) PacketSetter {
-	return func(packet *Packet) {
-		packet.Addr = addr
-	}
+func UsePacket(packet Packet) Packet {
+	packet.AddRef()
+	return packet
 }
 
-func PacketTime(time time.Time) PacketSetter {
-	return func(packet *Packet) {
-		packet.Time = time
-	}
+type IncomingPacket struct {
+	*IncomingLayer
+	addr      net.Addr
+	time      time.Time
+	relations pool.Relations
+	pool      pool.Pool[*IncomingPacket]
 }
 
-func PacketData(data *pool.Data) PacketSetter {
-	return func(packet *Packet) {
-		packet.Chunks = append(packet.Chunks[:0], data)
-	}
+func NewIncomingPacket(layer *IncomingLayer, pool pool.Pool[*IncomingPacket]) *IncomingPacket {
+	return &IncomingPacket{IncomingLayer: layer, pool: pool}
 }
 
-func PacketChunks(chunks []*pool.Data) PacketSetter {
-	return func(packet *Packet) {
-		packet.Chunks = append(packet.Chunks[:0], chunks...)
-	}
+func ProvideIncomingPacket(p pool.Pool[*IncomingPacket]) *IncomingPacket {
+	return NewIncomingPacket(NewIncomingLayer(), p)
 }
 
-func PacketPool(pool pool.Pool[*Packet]) PacketSetter {
-	return func(packet *Packet) {
-		packet.pool = pool
-	}
+func (p *IncomingPacket) Addr() net.Addr {
+	return p.addr
 }
 
-func NewPacket(layer *Layer, setters ...PacketSetter) *Packet {
-	p := &Packet{Layer: layer}
-	for _, setter := range setters {
-		setter(p)
-	}
-	return p
+func (p *IncomingPacket) SetAddr(addr net.Addr) {
+	p.addr = addr
 }
 
-func (p *Packet) Clear() {
-	for _, chunk := range p.Chunks {
-		chunk.Release()
-	}
-	p.Addr = nil
-	p.Time = time.Time{}
-	p.Chunks = p.Chunks[:0]
+func (p *IncomingPacket) Time() time.Time {
+	return p.time
 }
 
-func (p *Packet) Release() {
-	if c := p.ref.Add(-1); c == 0 {
+func (p *IncomingPacket) SetTime(t time.Time) {
+	p.time = t
+}
+
+func (p *IncomingPacket) AddRelation(relation pool.Reference) {
+	p.relations.AddRelation(relation)
+}
+
+func (p *IncomingPacket) Clear() {
+	p.relations.Clear()
+	p.addr = nil
+	p.time = time.Time{}
+}
+
+func (p *IncomingPacket) Release() bool {
+	if p.relations.Release() {
 		p.Clear()
 		if p.pool != nil {
 			p.pool.Put(p)
 		}
-	} else if c < 0 {
-		panic(fmt.Errorf("repeat release packet, ref [%d -> %d]", c+1, c))
+		return true
+	}
+	return false
+}
+
+func (p *IncomingPacket) AddRef() {
+	p.relations.AddRef()
+}
+
+func (p *IncomingPacket) Use() *IncomingPacket {
+	p.AddRef()
+	return p
+}
+
+type DefaultPacket struct {
+	DefaultLayer
+	relations pool.Relations
+	pool      pool.Pool[*DefaultPacket]
+}
+
+func NewDefaultPacket(pool pool.Pool[*DefaultPacket], payload Payload) *DefaultPacket {
+	p := &DefaultPacket{pool: pool}
+	p.Init(payload)
+	return p
+}
+
+func DefaultPacketProvider(payloadProvider func() Payload) func(pool pool.Pool[*DefaultPacket]) *DefaultPacket {
+	return func(pool pool.Pool[*DefaultPacket]) *DefaultPacket {
+		return NewDefaultPacket(pool, payloadProvider())
 	}
 }
 
-func (p *Packet) AddRef() {
-	if c := p.ref.Add(1); c <= 0 {
-		panic(fmt.Errorf("invalid packet reference, ref [%d -> %d]", c-1, c))
+func (p *DefaultPacket) AddRelation(relation pool.Reference) {
+	p.relations.AddRelation(relation)
+}
+
+func (p *DefaultPacket) Clear() {
+	p.relations.Clear()
+	p.Header.Clear()
+	if p.payload != nil {
+		p.payload.Clear()
 	}
 }
 
-func (p *Packet) Use() *Packet {
+func (p *DefaultPacket) Release() bool {
+	if p.relations.Release() {
+		p.Clear()
+		if p.pool != nil {
+			p.pool.Put(p)
+		}
+		return true
+	}
+	return false
+}
+
+func (p *DefaultPacket) AddRef() {
+	p.relations.AddRef()
+}
+
+func (p *DefaultPacket) Use() *DefaultPacket {
 	p.AddRef()
 	return p
 }

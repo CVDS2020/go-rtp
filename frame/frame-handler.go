@@ -7,7 +7,7 @@ import (
 )
 
 type FrameHandler interface {
-	HandleFrame(stream server.Stream, frame *Frame)
+	HandleFrame(stream server.Stream, frame *IncomingFrame)
 
 	OnParseRTPError(stream server.Stream, err error) (keep bool)
 
@@ -15,12 +15,12 @@ type FrameHandler interface {
 }
 
 type FrameHandlerFunc struct {
-	HandleFrameFn     func(stream server.Stream, frame *Frame)
+	HandleFrameFn     func(stream server.Stream, frame *IncomingFrame)
 	OnParseRTPErrorFn func(stream server.Stream, err error) (keep bool)
 	OnStreamClosedFn  func(stream server.Stream)
 }
 
-func (h FrameHandlerFunc) HandleFrame(stream server.Stream, frame *Frame) {
+func (h FrameHandlerFunc) HandleFrame(stream server.Stream, frame *IncomingFrame) {
 	if handleFrameFn := h.HandleFrameFn; handleFrameFn != nil {
 		handleFrameFn(stream, frame)
 	}
@@ -40,26 +40,24 @@ func (h FrameHandlerFunc) OnStreamClosed(stream server.Stream) {
 }
 
 type FrameRTPHandler struct {
-	cur          *Frame
+	cur          *IncomingFrame
 	frameHandler FrameHandler
-	framePool    *pool.SyncPool[*Frame]
+	framePool    *pool.SyncPool[*IncomingFrame]
+}
+
+func newFrame(p *pool.SyncPool[*IncomingFrame]) *IncomingFrame {
+	return &IncomingFrame{pool: p}
 }
 
 func NewFrameRTPHandler(frameHandler FrameHandler) *FrameRTPHandler {
 	return &FrameRTPHandler{
 		frameHandler: frameHandler,
-		framePool: pool.NewSyncPool(func(p *pool.SyncPool[*Frame]) *Frame {
-			return &Frame{
-				Layer: new(Layer),
-				pool:  p,
-			}
-		}),
+		framePool:    pool.NewSyncPool(newFrame),
 	}
 }
 
-func (h *FrameRTPHandler) HandlePacket(stream server.Stream, packet *rtp.Packet) (dropped, keep bool) {
-	defer packet.Release()
-	if h.cur != nil && (packet.Timestamp() != h.cur.Timestamp || packet.PayloadType() != h.cur.PayloadType) {
+func (h *FrameRTPHandler) HandlePacket(stream server.Stream, packet *rtp.IncomingPacket) (dropped, keep bool) {
+	if h.cur != nil && (packet.Timestamp() != h.cur.Timestamp() || packet.PayloadType() != h.cur.PayloadType()) {
 		h.frameHandler.HandleFrame(stream, h.cur)
 		h.cur = nil
 	}
@@ -75,8 +73,9 @@ func (h *FrameRTPHandler) OnParseError(stream server.Stream, err error) (keep bo
 }
 
 func (h *FrameRTPHandler) OnStreamClosed(stream server.Stream) {
-	if h.cur != nil && len(h.cur.Packets) != 0 {
+	if h.cur != nil && h.cur.Len() != 0 {
 		h.frameHandler.HandleFrame(stream, h.cur)
+		h.cur = nil
 	}
 	h.frameHandler.OnStreamClosed(stream)
 }

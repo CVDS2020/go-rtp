@@ -15,12 +15,12 @@ var InvalidTCPHeaderIDError = errors.New("invalid tcp header id")
 
 type Parser struct {
 	//ID     byte
-	Layer  *Layer
+	Layer  *IncomingLayer
 	Length uint16
 	//Err       error
 	header []byte
 	need   int
-	cache  []byte
+	cache  [][]byte
 }
 
 func (p *Parser) reset() {
@@ -71,14 +71,8 @@ func (p *Parser) Parse(buf []byte) (ok bool, remain []byte, err error) {
 
 	// parse rtp body
 	if len(buf) >= p.need {
-		var data []byte
-		if len(p.cache) > 0 {
-			p.cache = append(p.cache, buf[:p.need]...)
-			data = p.cache
-		} else {
-			data = buf[:p.need]
-		}
-		if err = p.Layer.Unmarshal(data); err == nil {
+		p.cache = append(p.cache, buf[:p.need])
+		if err = p.Layer.UnmarshalChunks(p.cache); err == nil {
 			ok = true
 		}
 		// parse completion, reset parser
@@ -87,7 +81,7 @@ func (p *Parser) Parse(buf []byte) (ok bool, remain []byte, err error) {
 		return
 	}
 	// bytes not enough, add to cache
-	p.cache = append(p.cache, buf...)
+	p.cache = append(p.cache, buf)
 	p.need -= len(buf)
 	return
 }

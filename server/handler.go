@@ -5,7 +5,7 @@ import (
 )
 
 type Handler interface {
-	HandlePacket(stream Stream, packet *rtp.Packet) (dropped, keep bool)
+	HandlePacket(stream Stream, packet *rtp.IncomingPacket) (dropped, keep bool)
 
 	OnParseError(stream Stream, err error) (keep bool)
 
@@ -13,12 +13,12 @@ type Handler interface {
 }
 
 type HandlerFunc struct {
-	HandlePacketFn   func(stream Stream, packet *rtp.Packet) (dropped, keep bool)
+	HandlePacketFn   func(stream Stream, packet *rtp.IncomingPacket) (dropped, keep bool)
 	OnParseErrorFn   func(stream Stream, err error) (keep bool)
 	OnStreamClosedFn func(stream Stream)
 }
 
-func (h HandlerFunc) HandlePacket(stream Stream, packet *rtp.Packet) (dropped, keep bool) {
+func (h HandlerFunc) HandlePacket(stream Stream, packet *rtp.IncomingPacket) (dropped, keep bool) {
 	if handlePacketFn := h.HandlePacketFn; handlePacketFn != nil {
 		return handlePacketFn(stream, packet)
 	} else {

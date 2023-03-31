@@ -3,6 +3,7 @@ package server
 import (
 	"gitee.com/sy_183/common/lock"
 	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/option"
 	"gitee.com/sy_183/rtp/rtp"
 	"net"
 	"sync"
@@ -42,11 +43,9 @@ type Stream interface {
 
 	SetCloseConn(enable bool) Stream
 
-	Send(layer *rtp.Layer) error
+	Send(layer rtp.Layer) error
 
 	Close()
-
-	Handler
 
 	log.LoggerProvider
 }
@@ -77,7 +76,11 @@ type abstractStream[S TCPServer | UDPServer, A net.TCPAddr | net.UDPAddr] struct
 	log.AtomicLogger
 }
 
-func (s *abstractStream[S, A]) init(self Stream, server *S, localAddr *A, remoteAddr net.Addr, ssrc int64, handler Handler, options ...Option) {
+func (s *abstractStream[S, A]) SetSelf(self Stream) {
+	s.self = self
+}
+
+func (s *abstractStream[S, A]) init(self Stream, server *S, localAddr *A, remoteAddr net.Addr, ssrc int64, handler Handler, options ...option.AnyOption) {
 	s.self = self
 	s.server.Store(server)
 	s.localAddr = localAddr
@@ -85,8 +88,8 @@ func (s *abstractStream[S, A]) init(self Stream, server *S, localAddr *A, remote
 	self.SetSSRC(ssrc)
 	self.SetHandler(handler)
 	self.SetCloseConn(true)
-	for _, option := range options {
-		option.apply(s)
+	for _, opt := range options {
+		opt.Apply(s)
 	}
 }
 
@@ -184,7 +187,7 @@ func (s *abstractStream[S, A]) SetCloseConn(enable bool) Stream {
 	return s
 }
 
-func (s *abstractStream[S, A]) Send(layer *rtp.Layer) error {
+func (s *abstractStream[S, A]) Send(layer rtp.Layer) error {
 	panic("not implement")
 }
 
@@ -194,8 +197,8 @@ func (s *abstractStream[S, A]) Close() {
 	}
 }
 
-func (s *abstractStream[S, A]) HandlePacket(stream Stream, packet *rtp.Packet) (dropped, keep bool) {
-	addr, is := any(packet.Addr).(*A)
+func (s *abstractStream[S, A]) HandlePacket(stream Stream, packet *rtp.IncomingPacket) (dropped, keep bool) {
+	addr, is := any(packet.Addr()).(*A)
 	if !is {
 		return true, true
 	}
@@ -205,7 +208,6 @@ func (s *abstractStream[S, A]) HandlePacket(stream Stream, packet *rtp.Packet) (
 		}
 		var uAddr = (*net.UDPAddr)(unsafe.Pointer(addr))
 		var rAddr *A
-		layer := packet.Layer
 		if !s.remoteAddr.CompareAndSwap(nil, addr) {
 			rAddr = s.remoteAddr.Load()
 			ruAddr := (*net.UDPAddr)(unsafe.Pointer(rAddr))
@@ -217,9 +219,10 @@ func (s *abstractStream[S, A]) HandlePacket(stream Stream, packet *rtp.Packet) (
 				return true, true
 			}
 		}
-		if !s.ssrc.CompareAndSwap(-1, int64(layer.SSRC())) {
+		rSsrc := packet.SSRC()
+		if !s.ssrc.CompareAndSwap(-1, int64(rSsrc)) {
 			ssrc := s.ssrc.Load()
-			if ssrc != int64(layer.SSRC()) {
+			if ssrc != int64(rSsrc) {
 				packet.Release()
 				return true, true
 			}

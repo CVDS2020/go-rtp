@@ -103,9 +103,9 @@ func main() {
 	}
 	s := server.NewUDPServer(cfg.Addr, options...)
 	s.SetLogger(Logger().WithOptions(log.WithName(s.Addr().String())))
-	s.Stream(nil, -1, server.HandlerFunc{HandlePacketFn: func(stream server.Stream, packet *rtp.Packet) {
+	s.Stream(nil, -1, server.HandlerFunc{HandlePacketFn: func(stream server.Stream, packet *rtp.IncomingPacket) {
 		defer packet.Release()
-		if err := rw.Write(packet.Layer); err != nil {
+		if err := rw.Write(packet.IncomingLayer); err != nil {
 			stream.Logger().ErrorWith("write rtp packet error", err)
 		}
 	}, OnStreamClosedFn: func(stream server.Stream) {

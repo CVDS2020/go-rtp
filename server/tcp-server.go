@@ -7,6 +7,7 @@ import (
 	"gitee.com/sy_183/common/lifecycle"
 	"gitee.com/sy_183/common/lock"
 	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/option"
 	"gitee.com/sy_183/common/pool"
 	mapUtils "gitee.com/sy_183/common/utils/map"
 	"gitee.com/sy_183/rtp/rtp"
@@ -24,7 +25,7 @@ type TCPServer struct {
 	listener closableWrapper[net.TCPListener]
 
 	// 默认的通道配置项
-	channelOptions []Option
+	channelOptions []option.AnyOption
 	// TCP连接通道
 	channels map[string]*TCPChannel
 	// 未匹配到通道的流
@@ -35,14 +36,14 @@ type TCPServer struct {
 	// 错误处理函数
 	onError atomic.Pointer[func(s Server, err error)]
 	// 接受TCP连接的处理函数
-	onAccept atomic.Pointer[func(s *TCPServer, conn *net.TCPConn) []Option]
+	onAccept atomic.Pointer[func(s *TCPServer, conn *net.TCPConn) []option.AnyOption]
 	// tCP连接通道创建成功的处理函数
 	onChannelCreated atomic.Pointer[func(s *TCPServer, channel *TCPChannel)]
 
 	log.AtomicLogger
 }
 
-func newTCPServer(listener *net.TCPListener, addr *net.TCPAddr, options ...Option) *TCPServer {
+func newTCPServer(listener *net.TCPListener, addr *net.TCPAddr, options ...option.AnyOption) *TCPServer {
 	var s *TCPServer
 	if listener != nil {
 		s = &TCPServer{addr: listener.Addr().(*net.TCPAddr)}
@@ -52,8 +53,8 @@ func newTCPServer(listener *net.TCPListener, addr *net.TCPAddr, options ...Optio
 	}
 	s.channels = make(map[string]*TCPChannel)
 	s.streams = make(map[string]*TCPStream)
-	for _, option := range options {
-		option.apply(s)
+	for _, opt := range options {
+		opt.Apply(s)
 	}
 	if s.addr == nil {
 		s.addr = &net.TCPAddr{IP: net.IP{0, 0, 0, 0}, Port: 5004}
@@ -66,11 +67,11 @@ func newTCPServer(listener *net.TCPListener, addr *net.TCPAddr, options ...Optio
 	return s
 }
 
-func NewTCPServer(addr *net.TCPAddr, options ...Option) *TCPServer {
+func NewTCPServer(addr *net.TCPAddr, options ...option.AnyOption) *TCPServer {
 	return newTCPServer(nil, addr, options...)
 }
 
-func NewTCPServerWithListener(listener *net.TCPListener, options ...Option) *TCPServer {
+func NewTCPServerWithListener(listener *net.TCPListener, options ...option.AnyOption) *TCPServer {
 	return newTCPServer(listener, nil, options...)
 }
 
@@ -78,7 +79,7 @@ func (s *TCPServer) setTimeout(timeout time.Duration) {
 	s.channelOptions = append(s.channelOptions, WithTimeout(timeout))
 }
 
-func (s *TCPServer) setPacketPoolProvider(provider pool.PoolProvider[*rtp.Packet]) {
+func (s *TCPServer) setPacketPoolProvider(provider pool.PoolProvider[*rtp.IncomingPacket]) {
 	s.channelOptions = append(s.channelOptions, WithPacketPoolProvider(provider))
 }
 
@@ -98,7 +99,7 @@ func (s *TCPServer) setCloseOnStreamClosed(enable bool) {
 	s.channelOptions = append(s.channelOptions, WithCloseOnStreamClosed(enable))
 }
 
-func (s *TCPServer) setOnAccept(onAccept func(s *TCPServer, conn *net.TCPConn) []Option) {
+func (s *TCPServer) setOnAccept(onAccept func(s *TCPServer, conn *net.TCPConn) []option.AnyOption) {
 	s.onAccept.Store(&onAccept)
 }
 
@@ -106,7 +107,7 @@ func (s *TCPServer) setOnChannelCreated(onChannelCreated func(s *TCPServer, chan
 	s.onChannelCreated.Store(&onChannelCreated)
 }
 
-func (s *TCPServer) newChannel(conn *net.TCPConn, options ...Option) *TCPChannel {
+func (s *TCPServer) newChannel(conn *net.TCPConn, options ...option.AnyOption) *TCPChannel {
 	remoteTCPAddr := conn.RemoteAddr().(*net.TCPAddr)
 	var localTCPAddr *net.TCPAddr
 	if localAddr := conn.LocalAddr(); localAddr != nil {
@@ -118,16 +119,11 @@ func (s *TCPServer) newChannel(conn *net.TCPConn, options ...Option) *TCPChannel
 		localAddr:  localTCPAddr,
 		remoteAddr: remoteTCPAddr,
 		addrID:     addrID,
-		dropBuffer: make([]byte, 4096),
-
-		packetPool: pool.NewSyncPool(func(p *pool.SyncPool[*rtp.Packet]) *rtp.Packet {
-			return rtp.NewPacket(rtp.NewLayer(), rtp.PacketPool(p))
-		}),
 	}
 	ch.conn.Set(conn, false)
 	ch.SetCloseOnStreamClosed(true)
-	for _, option := range options {
-		option.apply(ch)
+	for _, opt := range options {
+		opt.Apply(ch)
 	}
 	if timeout := ch.Timeout(); timeout != 0 && timeout < time.Second {
 		ch.SetTimeout(timeout)
@@ -137,6 +133,9 @@ func (s *TCPServer) newChannel(conn *net.TCPConn, options ...Option) *TCPChannel
 	}
 	if ch.writeBufferPool == nil {
 		ch.writeBufferPool = pool.NewStaticDataPool(rtp.DefaultWriteBufferSize, pool.ProvideSlicePool[*pool.Data])
+	}
+	if ch.packetPool == nil {
+		ch.setPacketPoolProvider(pool.ProvideSyncPool[*rtp.IncomingPacket])
 	}
 	if onError := ch.onError.Load(); onError == nil {
 		ch.SetOnError(ch.defaultOnError)
@@ -194,14 +193,14 @@ func (s *TCPServer) defaultOnError(_ Server, err error) {
 	}
 }
 
-func (s *TCPServer) GetOnAccept() func(s *TCPServer, conn *net.TCPConn) []Option {
+func (s *TCPServer) GetOnAccept() func(s *TCPServer, conn *net.TCPConn) []option.AnyOption {
 	if onAccept := s.onAccept.Load(); onAccept != nil {
 		return *onAccept
 	}
 	return nil
 }
 
-func (s *TCPServer) SetOnAccept(onAccept func(s *TCPServer, conn *net.TCPConn) []Option) *TCPServer {
+func (s *TCPServer) SetOnAccept(onAccept func(s *TCPServer, conn *net.TCPConn) []option.AnyOption) *TCPServer {
 	s.setOnAccept(onAccept)
 	return s
 }
@@ -365,7 +364,7 @@ func (s *TCPServer) bindStream(stream *TCPStream) bool {
 	})
 }
 
-func (s *TCPServer) Stream(remoteAddr net.Addr, ssrc int64, handler Handler, options ...Option) (Stream, error) {
+func (s *TCPServer) Stream(remoteAddr net.Addr, ssrc int64, handler Handler, options ...option.AnyOption) (Stream, error) {
 	tAddr, is := remoteAddr.(*net.TCPAddr)
 	if !is {
 		return nil, errors.New("")

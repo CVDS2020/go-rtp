@@ -10,7 +10,7 @@ type Writer struct {
 	Writer io.Writer
 }
 
-func (w *Writer) Write(layer *Layer) error {
+func (w *Writer) Write(layer *IncomingLayer) error {
 	size := layer.Size()
 	if size > math.MaxUint16 {
 		return nil

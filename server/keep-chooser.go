@@ -18,9 +18,10 @@ type defaultKeepChooser struct {
 	secErrorCounter  *container.Queue[time.Time]
 	maxSerializedErr int
 	serializedErrors int
+	onError          func(err error) bool
 }
 
-func NewDefaultKeepChooser(secMaxErr int, maxSerializedErr int) KeepChooser {
+func NewDefaultKeepChooser(secMaxErr int, maxSerializedErr int, onError func(err error) bool) KeepChooser {
 	if secMaxErr < 0 {
 		secMaxErr = 5
 	} else if secMaxErr > 100 {
@@ -32,6 +33,7 @@ func NewDefaultKeepChooser(secMaxErr int, maxSerializedErr int) KeepChooser {
 	return &defaultKeepChooser{
 		secErrorCounter:  container.NewQueue[time.Time](secMaxErr),
 		maxSerializedErr: maxSerializedErr,
+		onError:          onError,
 	}
 }
 
@@ -42,6 +44,11 @@ func (c *defaultKeepChooser) OnSuccess() {
 }
 
 func (c *defaultKeepChooser) OnError(err error) (keep bool) {
+	if c.onError != nil {
+		if !c.onError(err) {
+			return false
+		}
+	}
 	if c.serializedErrors++; c.serializedErrors > c.maxSerializedErr {
 		return false
 	}
@@ -75,10 +82,10 @@ func KeepChooserHandler(handler Handler, chooser KeepChooser) Handler {
 }
 
 func DefaultKeepChooserHandler(handler Handler, secMaxErr int, maxSerializedErr int) Handler {
-	return keepChooserHandler{handler: handler, keepChooser: NewDefaultKeepChooser(secMaxErr, maxSerializedErr)}
+	return keepChooserHandler{handler: handler, keepChooser: NewDefaultKeepChooser(secMaxErr, maxSerializedErr, nil)}
 }
 
-func (h keepChooserHandler) HandlePacket(stream Stream, packet *rtp.Packet) (dropped, keep bool) {
+func (h keepChooserHandler) HandlePacket(stream Stream, packet *rtp.IncomingPacket) (dropped, keep bool) {
 	h.keepChooser.OnSuccess()
 	return h.handler.HandlePacket(stream, packet)
 }

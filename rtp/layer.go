@@ -2,81 +2,234 @@ package rtp
 
 import (
 	"encoding/binary"
+	"fmt"
 	"gitee.com/sy_183/common/assert"
 	"gitee.com/sy_183/common/errors"
 	"gitee.com/sy_183/common/slice"
+	"gitee.com/sy_183/common/uns"
+	ioutil "gitee.com/sy_183/common/utils/io"
 	"gitee.com/sy_183/rtp/utils"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
 
 var (
-	InvalidVersionError = errors.New("rtp version must be 2")
-
-	CSRCLengthOutOfRange = errors.New("rtp CSRC length out of range(0, 15)")
-
-	ExtensionLengthOutOfRange = errors.New("rtp extension length out of range(0, 65535)")
-
-	PayloadLengthOutOfRange = errors.New("rtp payload length out of range(0, 65535)")
-
-	ZeroPaddingLengthError = errors.New("rtp padding length must not be zero")
-
-	PacketSizeNotEnoughError = errors.New("rtp packet size not enough")
+	InvalidVersionError       = errors.New("RTP版本号必须为2")
+	CSRCLengthOutOfRange      = errors.New("RTP CSRC长度超过限制(0, 15)")
+	ExtensionLengthOutOfRange = errors.New("RTP扩展头部长度超过限制(0, 65535)")
+	PayloadLengthOutOfRange   = errors.New("RTP负载长度超过限制(0, 65535)")
+	ZeroPaddingLengthError    = errors.New("RTP填充长度不能为0")
+	PacketSizeNotEnoughError  = errors.New("RTP包大小不够")
 )
 
-const RTPHeaderMinSize = 12
+const RtpHeaderMinSize = 12
 
-type PayloadContent struct {
+type Payload interface {
+	Size() int
+
+	Bytes() []byte
+
+	io.Reader
+
+	io.WriterTo
+
+	Clear()
+}
+
+type IncomingPayload struct {
 	content []byte
 	extends [][]byte
+	size    int
 }
 
-func (c *PayloadContent) Content() []byte {
-	return c.content
+func NewIncomingPayload() *IncomingPayload {
+	return new(IncomingPayload)
 }
 
-func (c *PayloadContent) Extends() [][]byte {
-	return c.extends
+func ProvideIncomingPayload() Payload {
+	return NewIncomingPayload()
 }
 
-func (c *PayloadContent) Size() uint {
-	l := len(c.content)
-	for _, extend := range c.extends {
-		l += len(extend)
-	}
-	return uint(l)
+func (p *IncomingPayload) Content() []byte {
+	return p.content
 }
 
-func (c *PayloadContent) WriteTo(w io.Writer) (n int64, err error) {
-	// write payload content
-	if err = utils.Write(w, c.content, &n); err != nil {
-		return
-	}
+func (p *IncomingPayload) Extends() [][]byte {
+	return p.extends
+}
 
-	// write extend payload content
-	for _, content := range c.extends {
-		if err = utils.Write(w, content, &n); err != nil {
-			return
+func (p *IncomingPayload) Range(f func(chunk []byte) bool) bool {
+	if p.content != nil {
+		if !f(p.content) {
+			return false
 		}
 	}
-
-	return
+	for _, chunk := range p.extends {
+		if !f(chunk) {
+			return false
+		}
+	}
+	return true
 }
 
-func (c *PayloadContent) Read(p []byte) (n int, err error) {
-	w := utils.Writer{Buf: p}
-	_n, _ := c.WriteTo(&w)
-	return int(_n), io.EOF
+func (p *IncomingPayload) SetContent(content []byte) *IncomingPayload {
+	p.content = content
+	p.extends = p.extends[:0]
+	p.size = len(content)
+	return p
 }
 
-func (c *PayloadContent) Bytes() []byte {
-	w := utils.Writer{Buf: make([]byte, c.Size())}
-	n, _ := c.WriteTo(&w)
+func (p *IncomingPayload) setContents(contents [][]byte) {
+	p.content = contents[0]
+	p.extends = append(p.extends[:0], contents[1:]...)
+	p.size = 0
+	for _, content := range contents {
+		p.size += len(content)
+	}
+}
+
+func (p *IncomingPayload) SetContents(contents [][]byte) *IncomingPayload {
+	if len(contents) == 0 {
+		return p.SetContent(nil)
+	}
+	p.setContents(contents)
+	return p
+}
+
+func (p *IncomingPayload) AddContent(content []byte) *IncomingPayload {
+	if p.content == nil && len(p.extends) == 0 {
+		p.content = content
+	} else {
+		p.extends = append(p.extends, content)
+	}
+	p.size += len(content)
+	return p
+}
+
+func (p *IncomingPayload) AddContents(contents ...[]byte) *IncomingPayload {
+	if len(contents) == 0 {
+		return p
+	}
+	if p.content == nil && len(p.extends) == 0 {
+		p.setContents(contents)
+	} else {
+		p.extends = append(p.extends, contents...)
+		for _, content := range contents {
+			p.size += len(content)
+		}
+	}
+	return p
+}
+
+func (p *IncomingPayload) Size() int {
+	return p.size
+}
+
+func (p *IncomingPayload) Bytes() []byte {
+	w := utils.Writer{Buf: make([]byte, p.Size())}
+	n, _ := p.WriteTo(&w)
 	return w.Buf[:n]
 }
 
-type Layer struct {
+func (p *IncomingPayload) Read(buf []byte) (n int, err error) {
+	w := utils.Writer{Buf: buf}
+	_n, _ := p.WriteTo(&w)
+	return int(_n), io.EOF
+}
+
+func (p *IncomingPayload) WriteTo(w io.Writer) (n int64, err error) {
+	// write payload content
+	if err = ioutil.Write(w, p.content, &n); err != nil {
+		return
+	}
+	// write extend payload content
+	for _, content := range p.extends {
+		if err = ioutil.Write(w, content, &n); err != nil {
+			return
+		}
+	}
+	return
+}
+
+func (p *IncomingPayload) Clear() {
+	p.content = nil
+	p.extends = p.extends[:0]
+	p.size = 0
+}
+
+type Layer interface {
+	Version() uint8
+
+	HasPadding() bool
+
+	HasExtension() bool
+
+	CSRCCount() uint8
+
+	Marker() bool
+
+	SetMarker(maker bool)
+
+	PayloadType() uint8
+
+	SetPayloadType(payloadType uint8)
+
+	SequenceNumber() uint16
+
+	SetSequenceNumber(seq uint16)
+
+	Timestamp() uint32
+
+	SetTimestamp(timestamp uint32)
+
+	SSRC() uint32
+
+	SetSSRC(ssrc uint32)
+
+	CSRCList() []uint32
+
+	SetCSRCList(csrcList []uint32)
+
+	AddCSRC(csrc uint32)
+
+	AddCSRCList(csrcList ...uint32)
+
+	ExtensionProfile() uint16
+
+	SetExtensionProfile(profile uint16)
+
+	ExtensionLength() uint16
+
+	ExtensionContents() []uint32
+
+	SetExtensionContents(contents []uint32)
+
+	AddExtensionContent(content uint32)
+
+	AddExtensionContents(contents ...uint32)
+
+	PaddingLength() uint8
+
+	SetPaddingLength(length uint8)
+
+	DumpHeader(header *Header)
+
+	Payload() Payload
+
+	Size() int
+
+	Bytes() []byte
+
+	io.Reader
+
+	io.WriterTo
+
+	fmt.Stringer
+}
+
+type Header struct {
 	first             uint8
 	second            uint8
 	sequenceNumber    uint16
@@ -86,10 +239,290 @@ type Layer struct {
 	extensionProfile  uint16
 	extensionContents []uint32
 	paddingLength     uint8
-	PayloadContent
 }
 
-type LayerConfig struct {
+func (l *Header) Version() uint8 {
+	return l.first >> 6
+}
+
+func (l *Header) HasPadding() bool {
+	return l.first&0b00100000 != 0
+}
+
+func (l *Header) HasExtension() bool {
+	return l.first&0b00010000 != 0
+}
+
+func (l *Header) CSRCCount() uint8 {
+	return uint8(len(l.csrcList))
+}
+
+func (l *Header) Marker() bool {
+	return l.second&0b10000000 != 0
+}
+
+func (l *Header) SetMarker(maker bool) {
+	if maker {
+		l.second |= 0b10000000
+	} else {
+		l.second &= ^uint8(0b10000000)
+	}
+}
+
+func (l *Header) PayloadType() uint8 {
+	return l.second & 0b01111111
+}
+
+func (l *Header) SetPayloadType(payloadType uint8) {
+	l.second |= payloadType & 0b01111111
+}
+
+func (l *Header) SequenceNumber() uint16 {
+	return l.sequenceNumber
+}
+
+func (l *Header) SetSequenceNumber(seq uint16) {
+	l.sequenceNumber = seq
+}
+
+func (l *Header) Timestamp() uint32 {
+	return l.timestamp
+}
+
+func (l *Header) SetTimestamp(timestamp uint32) {
+	l.timestamp = timestamp
+}
+
+func (l *Header) SSRC() uint32 {
+	return l.ssrc
+}
+
+func (l *Header) SetSSRC(ssrc uint32) {
+	l.ssrc = ssrc
+}
+
+func (l *Header) CSRCList() []uint32 {
+	return l.csrcList
+}
+
+func (l *Header) SetCSRCList(csrcList []uint32) {
+	if len(csrcList) > 15 {
+		csrcList = csrcList[:15]
+	}
+	l.csrcList = csrcList
+}
+
+func (l *Header) AddCSRC(csrc uint32) {
+	if len(l.csrcList) < 15 {
+		l.csrcList = append(l.csrcList, csrc)
+	}
+}
+
+func (l *Header) AddCSRCList(csrcList ...uint32) {
+	limit := 15 - len(l.csrcList)
+	if len(csrcList) > limit {
+		csrcList = csrcList[:limit]
+	}
+	l.csrcList = append(l.csrcList, csrcList...)
+}
+
+func (l *Header) ExtensionProfile() uint16 {
+	return l.extensionProfile
+}
+
+func (l *Header) SetExtensionProfile(profile uint16) {
+	l.extensionProfile = profile
+}
+
+func (l *Header) ExtensionLength() uint16 {
+	return uint16(len(l.extensionContents))
+}
+
+func (l *Header) ExtensionContents() []uint32 {
+	return l.extensionContents
+}
+
+func (l *Header) SetExtensionContents(contents []uint32) {
+	if len(contents) > math.MaxUint16 {
+		contents = contents[:15]
+	}
+	l.extensionContents = contents
+}
+
+func (l *Header) AddExtensionContent(content uint32) {
+	if len(l.extensionContents) < math.MaxUint16 {
+		l.extensionContents = append(l.extensionContents, content)
+	}
+}
+
+func (l *Header) AddExtensionContents(contents ...uint32) {
+	limit := math.MaxUint16 - len(l.extensionContents)
+	if len(contents) > limit {
+		contents = contents[:limit]
+	}
+	l.extensionContents = append(l.extensionContents, contents...)
+}
+
+func (l *Header) PaddingLength() uint8 {
+	return l.paddingLength
+}
+
+func (l *Header) SetPaddingLength(length uint8) {
+	l.paddingLength = length
+	l.first |= 0b00100000
+}
+
+func (l *Header) DumpHeader(header *Header) {
+	*header = *l
+}
+
+func (l *Header) Clear() {
+	l.first = 2 << 6
+	l.second = 0
+	l.sequenceNumber = 0
+	l.timestamp = 0
+	l.ssrc = 0
+	l.csrcList = l.csrcList[:0]
+	l.extensionProfile = 0
+	l.extensionContents = l.extensionContents[:0]
+	l.paddingLength = 0
+}
+
+type combinedLayer struct {
+	*Header
+	payload Payload
+}
+
+func (l combinedLayer) Payload() Payload {
+	return l.payload
+}
+
+func (l combinedLayer) Size() int {
+	var extensionSize, paddingLength int
+	if l.HasExtension() {
+		extensionSize = 4 + int(l.ExtensionLength())*4
+	}
+	if l.HasPadding() {
+		paddingLength = int(l.PaddingLength())
+	}
+	return 12 + int(l.CSRCCount())*4 + extensionSize + l.payload.Size() + paddingLength
+}
+
+func (l combinedLayer) Bytes() []byte {
+	w := utils.Writer{Buf: make([]byte, l.Size())}
+	n, _ := l.WriteTo(&w)
+	return w.Buf[:n]
+}
+
+func (l combinedLayer) Read(p []byte) (n int, err error) {
+	w := utils.Writer{Buf: p}
+	_n, _ := l.WriteTo(&w)
+	return int(_n), io.EOF
+}
+
+const writeBufLen = 16
+
+func (l combinedLayer) WriteTo(w io.Writer) (n int64, err error) {
+	var buf [writeBufLen]byte
+	writer := ioutil.Writer{Buf: buf[:]}
+
+	defer func() { err = ioutil.HandleRecovery(recover()) }()
+
+	// write base header
+	buf[0], buf[1] = (l.CSRCCount()&0b00001111)|(l.first&0b11110000), l.second
+	binary.BigEndian.PutUint16(buf[2:], l.sequenceNumber)
+	binary.BigEndian.PutUint32(buf[4:], l.timestamp)
+	binary.BigEndian.PutUint32(buf[8:], l.ssrc)
+	ioutil.WritePanic(w, buf[:12], &n)
+
+	// write csrc list
+	for _, csrc := range l.csrcList {
+		if writer.WriteUint32(csrc); writer.Len() == writeBufLen {
+			ioutil.WriteAndResetPanic(&writer, w, &n)
+		}
+	}
+	ioutil.WriteAndResetPanic(&writer, w, &n)
+
+	// write extension if necessary
+	if l.HasExtension() {
+		// write extension header
+		extensionLength := l.ExtensionLength()
+		writer.WriteUint16(l.extensionProfile).WriteUint16(extensionLength)
+
+		// write extension content
+		for i := uint16(0); i < extensionLength; i++ {
+			if writer.WriteUint32(l.extensionContents[i]); writer.Len() == writeBufLen {
+				ioutil.WriteAndResetPanic(&writer, w, &n)
+			}
+		}
+		ioutil.WriteAndResetPanic(&writer, w, &n)
+	}
+
+	// write payload content
+	ioutil.WriteToPanic(l.payload, w, &n)
+
+	// write padding
+	if l.HasPadding() && l.paddingLength > 0 {
+		*uns.ConvertPointer[byte, uint64](&buf[0]) = 0
+		*uns.ConvertPointer[byte, uint64](&buf[8]) = 0
+		for remain := l.paddingLength; true; remain -= uint8(writeBufLen) {
+			if remain <= uint8(writeBufLen) {
+				buf[remain-1] = l.paddingLength
+				ioutil.WritePanic(w, buf[:remain], &n)
+				break
+			}
+			ioutil.WritePanic(w, buf[:], &n)
+		}
+	}
+
+	return
+}
+
+func (l combinedLayer) String() string {
+	sb := strings.Builder{}
+	sb.WriteString("RTP(Length=")
+	sb.WriteString(strconv.FormatUint(uint64(l.Size()), 10))
+	sb.WriteString(", PT=")
+	sb.WriteString(strconv.FormatUint(uint64(l.PayloadType()), 10))
+	sb.WriteString(", SSRC=0x")
+	sb.WriteString(strconv.FormatUint(uint64(l.ssrc), 16))
+	if csrcCount := len(l.csrcList); csrcCount > 0 {
+		csrcList := l.csrcList
+		sb.WriteString(", CSRC=[")
+		for i := 0; i < csrcCount; i++ {
+			sb.WriteString("0x")
+			sb.WriteString(strconv.FormatUint(uint64(csrcList[i]), 16))
+			if i != csrcCount-1 {
+				sb.WriteString(", ")
+			}
+		}
+		sb.WriteString("]")
+	}
+	sb.WriteString(", Seq=")
+	sb.WriteString(strconv.FormatUint(uint64(l.sequenceNumber), 10))
+	sb.WriteString(", Time=")
+	sb.WriteString(strconv.FormatUint(uint64(l.timestamp), 10))
+	sb.WriteString(", Payload=")
+	sb.WriteString(strconv.FormatUint(uint64(l.payload.Size()), 10))
+	if l.HasPadding() {
+		sb.WriteString(", Padding")
+	}
+	if l.HasExtension() {
+		sb.WriteString(", Extent")
+	}
+	if l.Marker() {
+		sb.WriteString(", Mark")
+	}
+	sb.WriteString(")")
+	return sb.String()
+}
+
+type IncomingLayer struct {
+	Header
+	payload IncomingPayload
+}
+
+type IncomingLayerConfig struct {
 	Marker            bool
 	PayloadType       uint8
 	SequenceNumber    uint16
@@ -100,26 +533,32 @@ type LayerConfig struct {
 	ExtensionContents []uint32
 	PaddingLength     uint8
 	PayloadContent    []byte
-	payloadContents   [][]byte
+	PayloadContents   [][]byte
 }
 
-func NewLayer() *Layer {
-	return &Layer{first: 2 << 6}
+func NewIncomingLayer() *IncomingLayer {
+	return &IncomingLayer{Header: Header{first: 2 << 6}}
 }
 
-func BuildLayer(cfg *LayerConfig) *Layer {
+func ProvideIncomingLayer() Layer {
+	return NewIncomingLayer()
+}
+
+func BuildIncomingLayer(cfg *IncomingLayerConfig) *IncomingLayer {
 	assert.PtrNotNil(cfg, "layer config")
-	l := &Layer{
-		sequenceNumber:    cfg.SequenceNumber,
-		timestamp:         cfg.Timestamp,
-		ssrc:              cfg.SSRC,
-		csrcList:          cfg.CSRCList,
-		extensionProfile:  cfg.ExtensionProfile,
-		extensionContents: cfg.ExtensionContents,
-		paddingLength:     cfg.PaddingLength,
-		PayloadContent: PayloadContent{
+	l := &IncomingLayer{
+		Header: Header{
+			sequenceNumber:    cfg.SequenceNumber,
+			timestamp:         cfg.Timestamp,
+			ssrc:              cfg.SSRC,
+			csrcList:          cfg.CSRCList,
+			extensionProfile:  cfg.ExtensionProfile,
+			extensionContents: cfg.ExtensionContents,
+			paddingLength:     cfg.PaddingLength,
+		},
+		payload: IncomingPayload{
 			content: cfg.PayloadContent,
-			extends: cfg.payloadContents,
+			extends: cfg.PayloadContents,
 		},
 	}
 	l.first = (2 << 6) | // version
@@ -137,136 +576,15 @@ func BuildLayer(cfg *LayerConfig) *Layer {
 	return l
 }
 
-func (l *Layer) Version() uint8 {
-	return l.first >> 6
+func (l *IncomingLayer) Payload() Payload {
+	return &l.payload
 }
 
-func (l *Layer) HasPadding() bool {
-	return l.first&0b00100000 != 0
+func (l *IncomingLayer) Size() int {
+	return combinedLayer{Header: &l.Header, payload: &l.payload}.Size()
 }
 
-func (l *Layer) HasExtension() bool {
-	return l.first&0b00010000 != 0
-}
-
-func (l *Layer) CSRCCount() uint8 {
-	return uint8(len(l.csrcList))
-}
-
-func (l *Layer) Marker() bool {
-	return l.second&0b10000000 != 0
-}
-
-func (l *Layer) SetMarker(maker bool) *Layer {
-	if maker {
-		l.second |= 0b10000000
-	} else {
-		l.second &= ^uint8(0b10000000)
-	}
-	return l
-}
-
-func (l *Layer) PayloadType() uint8 {
-	return l.second & 0b01111111
-}
-
-func (l *Layer) SetPayloadType(payloadType uint8) *Layer {
-	l.second |= payloadType & 0b01111111
-	return l
-}
-
-func (l *Layer) SequenceNumber() uint16 {
-	return l.sequenceNumber
-}
-
-func (l *Layer) SetSequenceNumber(seq uint16) *Layer {
-	l.sequenceNumber = seq
-	return l
-}
-
-func (l *Layer) Timestamp() uint32 {
-	return l.timestamp
-}
-
-func (l *Layer) SetTimestamp(timestamp uint32) *Layer {
-	l.timestamp = timestamp
-	return l
-}
-
-func (l *Layer) SSRC() uint32 {
-	return l.ssrc
-}
-
-func (l *Layer) SetSSRC(ssrc uint32) *Layer {
-	l.ssrc = ssrc
-	return l
-}
-
-func (l *Layer) CSRCList() []uint32 {
-	return l.csrcList
-}
-
-func (l *Layer) SetCSRCList(csrcList []uint32) *Layer {
-	l.csrcList = csrcList
-	return l
-}
-
-func (l *Layer) AddCSRC(csrc uint32) *Layer {
-	l.csrcList = append(l.csrcList, csrc)
-	return l
-}
-
-func (l *Layer) ExtensionProfile() uint16 {
-	return l.extensionProfile
-}
-
-func (l *Layer) SetExtensionProfile(profile uint16) {
-	l.extensionProfile = profile
-}
-
-func (l *Layer) ExtensionLength() uint16 {
-	return uint16(len(l.extensionContents))
-}
-
-func (l *Layer) ExtensionContents() []uint32 {
-	return l.extensionContents
-}
-
-func (l *Layer) SetExtensionContents(contents []uint32) *Layer {
-	l.extensionContents = contents
-	return l
-}
-
-func (l *Layer) AddExtensionContent(content uint32) *Layer {
-	l.extensionContents = append(l.extensionContents, content)
-	return l
-}
-
-func (l *Layer) PayloadLength() uint {
-	return l.PayloadContent.Size()
-}
-
-func (l *Layer) PaddingLength() uint8 {
-	return l.paddingLength
-}
-
-func (l *Layer) SetPaddingLength(length uint8) {
-	l.paddingLength = length
-	l.first |= 0b00100000
-}
-
-func (l *Layer) Size() uint {
-	var extensionSize, paddingLength uint
-	if l.HasExtension() {
-		extensionSize = 4 + uint(l.ExtensionLength())*4
-	}
-	if l.HasPadding() {
-		paddingLength = uint(l.paddingLength)
-	}
-	return 12 + uint(l.CSRCCount())*4 + extensionSize + l.PayloadContent.Size() + paddingLength
-}
-
-func (l *Layer) parseBaseHeader(baseHeader []byte, length int, minSize *int) (uint8, error) {
+func (l *IncomingLayer) parseBaseHeader(baseHeader []byte, length int, minSize *int) (uint8, error) {
 	l.first = baseHeader[0]
 	l.second = baseHeader[1]
 	if version := l.Version(); version != 2 {
@@ -291,7 +609,7 @@ func (l *Layer) parseBaseHeader(baseHeader []byte, length int, minSize *int) (ui
 	return csrcCount, nil
 }
 
-func (l *Layer) parseCSRC(csrcData []byte, csrcCount uint8) {
+func (l *IncomingLayer) parseCSRC(csrcData []byte, csrcCount uint8) {
 	l.csrcList = slice.AssignLen(l.csrcList[:0], int(csrcCount))
 	for i := uint8(0); i < csrcCount; i++ {
 		l.csrcList[i] = binary.BigEndian.Uint32(csrcData[:4])
@@ -300,7 +618,7 @@ func (l *Layer) parseCSRC(csrcData []byte, csrcCount uint8) {
 	return
 }
 
-func (l *Layer) parseExtensionHeader(extensionHeader []byte, length int, minSize *int) (uint16, error) {
+func (l *IncomingLayer) parseExtensionHeader(extensionHeader []byte, length int, minSize *int) (uint16, error) {
 	l.extensionProfile = binary.BigEndian.Uint16(extensionHeader[:2])
 	extensionLength := binary.BigEndian.Uint16(extensionHeader[2:4])
 
@@ -312,7 +630,7 @@ func (l *Layer) parseExtensionHeader(extensionHeader []byte, length int, minSize
 	return extensionLength, nil
 }
 
-func (l *Layer) parseExtensionData(extensionData []byte, extensionLength uint16) {
+func (l *IncomingLayer) parseExtensionData(extensionData []byte, extensionLength uint16) {
 	l.extensionContents = slice.AssignLen(l.extensionContents[:0], int(extensionLength))
 	for i := uint16(0); i < extensionLength; i++ {
 		l.extensionContents[i] = binary.BigEndian.Uint32(extensionData[:4])
@@ -320,7 +638,7 @@ func (l *Layer) parseExtensionData(extensionData []byte, extensionLength uint16)
 	}
 }
 
-func (l *Layer) parsePadding(length int, minSize *int) error {
+func (l *IncomingLayer) parsePadding(length int, minSize *int) error {
 	if l.paddingLength == 0 {
 		return ZeroPaddingLengthError
 	}
@@ -333,8 +651,8 @@ func (l *Layer) parsePadding(length int, minSize *int) error {
 	return nil
 }
 
-func (l *Layer) Unmarshal(data []byte) error {
-	minSize := RTPHeaderMinSize
+func (l *IncomingLayer) Unmarshal(data []byte) error {
+	minSize := RtpHeaderMinSize
 	length := len(data)
 	if length < minSize {
 		return PacketSizeNotEnoughError
@@ -375,24 +693,27 @@ func (l *Layer) Unmarshal(data []byte) error {
 	}
 
 	// parse payload content
-	l.content = cur[:length-minSize]
-	l.extends = l.extends[:0]
+	payload := &l.payload
+	payload.size = length - minSize
+	payload.content = cur[:payload.size]
+	payload.extends = payload.extends[:0]
 	return nil
 }
 
-func (l *Layer) UnmarshalChunks(chunks slice.Chunks[byte]) error {
-	if len(chunks) == 1 {
-		return l.Unmarshal(chunks[0])
+func (l *IncomingLayer) UnmarshalChunks(cs [][]byte) error {
+	if len(cs) == 1 {
+		return l.Unmarshal(cs[0])
 	}
 	var length int
-	var minSize = RTPHeaderMinSize
-	for _, chunk := range chunks {
+	var minSize = RtpHeaderMinSize
+	for _, chunk := range cs {
 		length += len(chunk)
 	}
 	if length < minSize {
 		return PacketSizeNotEnoughError
 	}
 
+	chunks := slice.Chunks[byte](cs)
 	baseHeader, cur := chunks.Slice(-1, 12), chunks.Cut(12, -1)
 	csrcCount, err := l.parseBaseHeader(baseHeader, length, &minSize)
 	if err != nil {
@@ -428,148 +749,83 @@ func (l *Layer) UnmarshalChunks(chunks slice.Chunks[byte]) error {
 	}
 
 	// parse payload content
-	payloadLength := length - minSize
+	payloadSize := length - minSize
 
-	if payloadLength > 0 {
-		contents := cur.Cut(-1, payloadLength)
-		l.content = contents[0]
-		l.extends = append(l.extends[:0], contents[1:]...)
+	payload := &l.payload
+	if payloadSize > 0 {
+		contents := cur.Cut(-1, payloadSize)
+		payload.size = payloadSize
+		payload.content = contents[0]
+		payload.extends = append(payload.extends[:0], contents[1:]...)
 	} else {
-		l.content = nil
-		l.extends = l.extends[:0]
+		payload.size = 0
+		payload.content = nil
+		payload.extends = payload.extends[:0]
 	}
 
 	return nil
 }
 
-const writeBufLen = 16
-
-func (l *Layer) WriteTo(w io.Writer) (n int64, err error) {
-	var buf [writeBufLen]byte
-
-	// write base header
-	buf[0], buf[1] = (l.CSRCCount()&0b00001111)|(l.first&0b11110000), l.second
-	binary.BigEndian.PutUint16(buf[2:], l.sequenceNumber)
-	binary.BigEndian.PutUint32(buf[4:], l.timestamp)
-	binary.BigEndian.PutUint32(buf[8:], l.ssrc)
-	if err = utils.Write(w, buf[:12], &n); err != nil {
-		return
-	}
-
-	// write csrc list
-	off := 0
-	for _, csrc := range l.csrcList {
-		binary.BigEndian.PutUint32(buf[off:], csrc)
-		if off += 4; off == writeBufLen {
-			if err = utils.Write(w, buf[:], &n); err != nil {
-				return
-			}
-			off = 0
-		}
-	}
-	if off > 0 {
-		if err = utils.Write(w, buf[:off], &n); err != nil {
-			return
-		}
-	}
-
-	// write extension if necessary
-	if l.HasExtension() {
-		// write extension header
-		extensionLength := l.ExtensionLength()
-		binary.BigEndian.PutUint16(buf[:], l.extensionProfile)
-		binary.BigEndian.PutUint16(buf[2:], extensionLength)
-		off = 4
-
-		// write extension content
-		for i := uint16(0); i < extensionLength; i++ {
-			binary.BigEndian.PutUint32(buf[off:], l.extensionContents[i])
-			if off += 4; off == writeBufLen {
-				if err = utils.Write(w, buf[:], &n); err != nil {
-					return
-				}
-				off = 0
-			}
-		}
-		if err = utils.Write(w, buf[:off], &n); err != nil {
-			return
-		}
-	}
-
-	// write payload content
-	if err = utils.WriteTo(&l.PayloadContent, w, &n); err != nil {
-		return
-	}
-
-	// write padding
-	if l.HasPadding() && l.paddingLength > 0 {
-		for i := 0; i < writeBufLen; i++ {
-			buf[i] = 0
-		}
-		for remain := l.paddingLength; true; remain -= uint8(writeBufLen) {
-			if remain <= uint8(writeBufLen) {
-				buf[remain-1] = l.paddingLength
-				if err = utils.Write(w, buf[:remain], &n); err != nil {
-					return
-				}
-				break
-			}
-			if err = utils.Write(w, buf[:], &n); err != nil {
-				return
-			}
-		}
-	}
-
-	return
+func (l *IncomingLayer) Read(p []byte) (n int, err error) {
+	return combinedLayer{Header: &l.Header, payload: &l.payload}.Read(p)
 }
 
-func (l *Layer) Read(p []byte) (n int, err error) {
-	w := utils.Writer{Buf: p}
-	_n, _ := l.WriteTo(&w)
-	return int(_n), io.EOF
+func (l *IncomingLayer) Bytes() []byte {
+	return combinedLayer{Header: &l.Header, payload: &l.payload}.Bytes()
 }
 
-func (l *Layer) Bytes() []byte {
-	w := utils.Writer{Buf: make([]byte, l.Size())}
-	n, _ := l.WriteTo(&w)
-	return w.Buf[:n]
+func (l *IncomingLayer) WriteTo(w io.Writer) (n int64, err error) {
+	return combinedLayer{Header: &l.Header, payload: &l.payload}.WriteTo(w)
 }
 
-func (l *Layer) String() string {
-	sb := strings.Builder{}
-	sb.WriteString("RTP(Length=")
-	sb.WriteString(strconv.FormatUint(uint64(l.Size()), 10))
-	sb.WriteString(", PT=")
-	sb.WriteString(strconv.FormatUint(uint64(l.PayloadType()), 10))
-	sb.WriteString(", SSRC=0x")
-	sb.WriteString(strconv.FormatUint(uint64(l.SSRC()), 16))
-	if csrcCount := l.CSRCCount(); csrcCount > 0 {
-		csrcList := l.CSRCList()
-		sb.WriteString(", CSRC=[")
-		for i := uint8(0); i < csrcCount; i++ {
-			sb.WriteString("0x")
-			sb.WriteString(strconv.FormatUint(uint64(csrcList[i]), 16))
-			if i != csrcCount-1 {
-				sb.WriteString(", ")
-			}
-		}
-		sb.WriteString("]")
+func (l *IncomingLayer) String() string {
+	return combinedLayer{Header: &l.Header, payload: &l.payload}.String()
+}
+
+type DefaultLayer struct {
+	Header
+	payload Payload
+}
+
+func NewDefaultLayer(payload Payload) *DefaultLayer {
+	return &DefaultLayer{Header: Header{first: 2 << 6}, payload: payload}
+}
+
+func DefaultLayerProvider(payloadProvider func() Payload) func() Layer {
+	return func() Layer {
+		return NewDefaultLayer(payloadProvider())
 	}
-	sb.WriteString(", Seq=")
-	sb.WriteString(strconv.FormatUint(uint64(l.SequenceNumber()), 10))
-	sb.WriteString(", Time=")
-	sb.WriteString(strconv.FormatUint(uint64(l.Timestamp()), 10))
-	sb.WriteString(", Payload=")
-	sb.WriteString(strconv.FormatUint(uint64(l.PayloadLength()), 10))
-	if l.HasPadding() {
-		sb.WriteString(", Padding")
-	}
-	if l.HasExtension() {
-		sb.WriteString(", Extent")
-	}
-	if l.Marker() {
-		sb.WriteString(", Mark")
-	}
-	sb.WriteString(")")
-	return sb.String()
+}
+
+func (l *DefaultLayer) Init(payload Payload) {
+	l.first = 2 << 6
+	l.payload = payload
+}
+
+func (l *DefaultLayer) Payload() Payload {
+	return l.payload
+}
+
+func (l *DefaultLayer) SetPayload(payload Payload) {
+	l.payload = payload
+}
+
+func (l *DefaultLayer) Size() int {
+	return combinedLayer{Header: &l.Header, payload: l.payload}.Size()
+}
+
+func (l *DefaultLayer) Bytes() []byte {
+	return combinedLayer{Header: &l.Header, payload: l.payload}.Bytes()
+}
+
+func (l *DefaultLayer) Read(p []byte) (n int, err error) {
+	return combinedLayer{Header: &l.Header, payload: l.payload}.Read(p)
+}
+
+func (l *DefaultLayer) WriteTo(w io.Writer) (n int64, err error) {
+	return combinedLayer{Header: &l.Header, payload: l.payload}.WriteTo(w)
+}
+
+func (l *DefaultLayer) String() string {
+	return combinedLayer{Header: &l.Header, payload: l.payload}.String()
 }

@@ -1,25 +1,16 @@
 package server
 
 import (
+	"gitee.com/sy_183/common/option"
 	"time"
 )
 
 // An ManagerOption configures a MultiStreamManager.
-type ManagerOption interface {
-	apply(m *Manager) any
-}
+type ManagerOption option.CustomOption[*Manager]
 
-// managerOptionFunc wraps a func, so it satisfies the ManagerOption interface.
-type managerOptionFunc func(m *Manager) any
-
-func (f managerOptionFunc) apply(m *Manager) any {
-	return f(m)
-}
-
-func WithServerOptions(options ...Option) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
+func WithServerOptions(options ...option.AnyOption) ManagerOption {
+	return option.Custom[*Manager](func(m *Manager) {
 		m.serverOptions = append(m.serverOptions, options...)
-		return nil
 	})
 }
 
@@ -35,7 +26,7 @@ func WithPortRange(start uint16, end uint16, excludes ...uint16) ManagerOption {
 	for _, exclude := range excludes {
 		excludeSet[exclude] = struct{}{}
 	}
-	return managerOptionFunc(func(m *Manager) any {
+	return option.Custom[*Manager](func(m *Manager) {
 		for i := start; i < end; i += 2 {
 			var ins [4]bool
 			_, ins[0] = excludeSet[i]
@@ -48,12 +39,11 @@ func WithPortRange(start uint16, end uint16, excludes ...uint16) ManagerOption {
 			m.portSet[i], m.portSet[i+1] = struct{}{}, struct{}{}
 			m.ports = append(m.ports, Port{RTP: i, RTCP: i + 1})
 		}
-		return nil
 	})
 }
 
 func WithPort(rtp uint16, rtcp uint16) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
+	return option.Custom[*Manager](func(m *Manager) {
 		var ins [2]bool
 		_, ins[0] = m.portSet[rtp]
 		_, ins[1] = m.portSet[rtcp]
@@ -61,27 +51,23 @@ func WithPort(rtp uint16, rtcp uint16) ManagerOption {
 			m.portSet[rtp], m.portSet[rtcp] = struct{}{}, struct{}{}
 			m.ports = append(m.ports, Port{RTP: rtp, RTCP: rtcp})
 		}
-		return nil
 	})
 }
 
 func WithServerMaxUsed(maxUsed uint) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
+	return option.Custom[*Manager](func(m *Manager) {
 		m.serverMaxUsed = maxUsed
-		return nil
 	})
 }
 
 func WithAllocMaxRetry(maxRetry int) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
+	return option.Custom[*Manager](func(m *Manager) {
 		m.allocMaxRetry = maxRetry
-		return nil
 	})
 }
 
 func WithServerRestartInterval(interval time.Duration) ManagerOption {
-	return managerOptionFunc(func(m *Manager) any {
+	return option.Custom[*Manager](func(m *Manager) {
 		m.serverRestartInterval = interval
-		return nil
 	})
 }

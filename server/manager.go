@@ -5,6 +5,7 @@ import (
 	"gitee.com/sy_183/common/lifecycle"
 	"gitee.com/sy_183/common/lock"
 	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/option"
 	"net"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ type Manager struct {
 	addr *net.IPAddr
 
 	// server options use to create server
-	serverOptions []Option
+	serverOptions []option.AnyOption
 
 	// used for port de duplication
 	portSet map[uint16]struct{}
@@ -70,7 +71,7 @@ type Manager struct {
 	log.AtomicLogger
 }
 
-type ServerProvider func(m *Manager, port uint16, options ...Option) Server
+type ServerProvider func(m *Manager, port uint16, options ...option.AnyOption) Server
 
 func NewManager(addr *net.IPAddr, serverProvider ServerProvider, options ...ManagerOption) *Manager {
 	m := &Manager{
@@ -80,8 +81,8 @@ func NewManager(addr *net.IPAddr, serverProvider ServerProvider, options ...Mana
 		serverContext:  make(map[Server]*serverContext),
 	}
 
-	for _, option := range options {
-		option.apply(m)
+	for _, opt := range options {
+		opt.Apply(m)
 	}
 
 	if m.addr == nil {

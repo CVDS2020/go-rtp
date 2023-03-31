@@ -6,6 +6,7 @@ import (
 	"gitee.com/sy_183/common/lifecycle"
 	"gitee.com/sy_183/common/lock"
 	"gitee.com/sy_183/common/log"
+	"gitee.com/sy_183/common/option"
 	"gitee.com/sy_183/common/pool"
 	"gitee.com/sy_183/rtp/rtp"
 	"net"
@@ -29,8 +30,7 @@ type UDPServer struct {
 
 	readBufferPool  pool.BufferPool
 	writeBufferPool pool.DataPool
-	dropBuffer      []byte
-	packetPool      pool.Pool[*rtp.Packet]
+	packetPool      pool.Pool[*rtp.IncomingPacket]
 
 	onError             atomic.Pointer[func(s Server, err error)]
 	closeOnStreamClosed atomic.Bool
@@ -38,7 +38,7 @@ type UDPServer struct {
 	log.AtomicLogger
 }
 
-func newUDPServer(listener *net.UDPConn, addr *net.UDPAddr, options ...Option) *UDPServer {
+func newUDPServer(listener *net.UDPConn, addr *net.UDPAddr, options ...option.AnyOption) *UDPServer {
 	var s *UDPServer
 	if listener != nil {
 		s = &UDPServer{addr: listener.LocalAddr().(*net.UDPAddr)}
@@ -46,11 +46,8 @@ func newUDPServer(listener *net.UDPConn, addr *net.UDPAddr, options ...Option) *
 	} else {
 		s = &UDPServer{addr: addr}
 	}
-	s.packetPool = pool.NewSyncPool(func(p *pool.SyncPool[*rtp.Packet]) *rtp.Packet {
-		return rtp.NewPacket(rtp.NewLayer(), rtp.PacketPool(p))
-	})
-	for _, option := range options {
-		option.apply(s)
+	for _, opt := range options {
+		opt.Apply(s)
 	}
 	if s.addr == nil {
 		s.addr = &net.UDPAddr{IP: net.IP{0, 0, 0, 0}, Port: 5004}
@@ -61,6 +58,9 @@ func newUDPServer(listener *net.UDPConn, addr *net.UDPAddr, options ...Option) *
 	if s.writeBufferPool == nil {
 		s.writeBufferPool = pool.NewStaticDataPool(rtp.DefaultWriteBufferSize, pool.ProvideSyncPool[*pool.Data])
 	}
+	if s.packetPool == nil {
+		s.setPacketPoolProvider(pool.ProvideSyncPool[*rtp.IncomingPacket])
+	}
 	if onError := s.onError.Load(); onError == nil {
 		s.SetOnError(s.defaultOnError)
 	}
@@ -69,16 +69,16 @@ func newUDPServer(listener *net.UDPConn, addr *net.UDPAddr, options ...Option) *
 	return s
 }
 
-func NewUDPServer(addr *net.UDPAddr, options ...Option) *UDPServer {
+func NewUDPServer(addr *net.UDPAddr, options ...option.AnyOption) *UDPServer {
 	return newUDPServer(nil, addr, options...)
 }
 
-func NewUDPServerWithListener(listener *net.UDPConn, options ...Option) *UDPServer {
+func NewUDPServerWithListener(listener *net.UDPConn, options ...option.AnyOption) *UDPServer {
 	return newUDPServer(listener, nil, options...)
 }
 
-func UDPServerProvider(options ...Option) ServerProvider {
-	return func(m *Manager, port uint16, opts ...Option) Server {
+func UDPServerProvider(options ...option.AnyOption) ServerProvider {
+	return func(m *Manager, port uint16, opts ...option.AnyOption) Server {
 		ipAddr := m.Addr()
 		return NewUDPServer(&net.UDPAddr{
 			IP:   ipAddr.IP,
@@ -88,10 +88,8 @@ func UDPServerProvider(options ...Option) ServerProvider {
 	}
 }
 
-func (s *UDPServer) setPacketPoolProvider(provider pool.PoolProvider[*rtp.Packet]) {
-	s.packetPool = provider(func(p pool.Pool[*rtp.Packet]) *rtp.Packet {
-		return rtp.NewPacket(rtp.NewLayer(), rtp.PacketPool(p))
-	})
+func (s *UDPServer) setPacketPoolProvider(provider pool.PoolProvider[*rtp.IncomingPacket]) {
+	s.packetPool = provider(rtp.ProvideIncomingPacket)
 }
 
 func (s *UDPServer) setReadBufferPool(bufferPool pool.BufferPool) {
@@ -260,9 +258,9 @@ func (s *UDPServer) run(lifecycle.Lifecycle) error {
 				}
 				continue
 			}
-			packet.Addr = addr
-			packet.Time = time.Now()
-			packet.Chunks = append(packet.Chunks[:0], data)
+			packet.SetAddr(addr)
+			packet.SetTime(time.Now())
+			packet.AddRelation(data)
 			dropped, keep := stream.HandlePacket(stream, packet)
 			if !keep && s.removeStream(stream) {
 				return nil
@@ -301,7 +299,7 @@ func (s *UDPServer) bindStream(stream *UDPStream) bool {
 	})
 }
 
-func (s *UDPServer) Stream(remoteAddr net.Addr, ssrc int64, handler Handler, options ...Option) (Stream, error) {
+func (s *UDPServer) Stream(remoteAddr net.Addr, ssrc int64, handler Handler, options ...option.AnyOption) (Stream, error) {
 	var uAddr *net.UDPAddr
 	if remoteAddr != nil {
 		addr, is := remoteAddr.(*net.UDPAddr)
@@ -353,11 +351,11 @@ func (s *UDPServer) RemoveStream(stream Stream) {
 	}
 }
 
-func (s *UDPServer) SendTo(layer *rtp.Layer, addr *net.UDPAddr) error {
+func (s *UDPServer) SendTo(layer rtp.Layer, addr *net.UDPAddr) error {
 	listener := s.listener.Get()
 	if listener != nil {
 		size := layer.Size()
-		data := s.writeBufferPool.Alloc(size)
+		data := s.writeBufferPool.Alloc(uint(size))
 		layer.Read(data.Data)
 		_, err := listener.WriteTo(data.Data, addr)
 		data.Release()

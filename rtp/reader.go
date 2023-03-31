@@ -10,7 +10,7 @@ type Reader struct {
 	Reader io.Reader
 }
 
-func (r *Reader) Read() (layer *Layer, err error) {
+func (r *Reader) Read() (layer *IncomingLayer, err error) {
 	buf := make([]byte, 2)
 	p := buf
 	var length uint16
@@ -29,7 +29,7 @@ func (r *Reader) Read() (layer *Layer, err error) {
 					buf = buf[:length]
 					p = buf
 				} else {
-					layer = NewLayer()
+					layer = NewIncomingLayer()
 					if e := layer.Unmarshal(buf); e != nil {
 						return nil, errors.Append(err, e)
 					}
